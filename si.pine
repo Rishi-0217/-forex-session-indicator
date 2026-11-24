@@ -1,0 +1,81 @@
+//@version=5
+indicator("Forex Session Liquidity Ranges", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// --- Session Time Inputs ---
+tz         = input.string("America/New_York", "Timezone", options=["America/New_York", "UTC", "Europe/London", "Asia/Dhaka"])
+extendHL   = input.bool(true, "Extend High/Low Liquidity Lines")
+
+showAsia   = input.bool(true, "Show Asia Session", inline="asia")
+asiaTime   = input.session("2000-0000", "", inline="asia")
+asiaColor  = input.color(color.new(#2962FF, 85), "", inline="asia")
+
+showLondon = input.bool(true, "Show London Session", inline="lon")
+lonTime    = input.session("0200-0500", "", inline="lon")
+lonColor   = input.color(color.new(#00897B, 85), "", inline="lon")
+
+showNY     = input.bool(true, "Show New York Session", inline="ny")
+nyTime     = input.session("0700-1000", "", inline="ny")
+nyColor    = input.color(color.new(#8E24AA, 85), "", inline="ny")
+
+// --- Function to Draw Session Boxes & Liquidity Lines ---
+drawSession(bool active, string sessTime, color bgCol, string labelTxt) =>
+    inSession  = not na(time(timeframe.period, sessTime, tz))
+    newSession = inSession and not inSession[1]
+
+    var box   sessBox  = na
+    var line  highLine = na
+    var line  lowLine  = na
+    var float sessHigh = na
+    var float sessLow  = na
+    var int   startBar = na
+
+    if active
+        if newSession
+            sessHigh := high
+            sessLow  := low
+            startBar := bar_index
+
+            sessBox := box.new(
+              left=bar_index,
+              top=sessHigh,
+              right=bar_index,
+              bottom=sessLow,
+              bgcolor=bgCol,
+              border_color=color.new(bgCol, 20),
+              border_width=1,
+              text=labelTxt,
+              text_color=color.new(bgCol, 0),
+              text_size=size.small,
+              text_halign=text.align_left)
+
+            if extendHL
+                highLine := line.new(bar_index, sessHigh, bar_index, sessHigh, color=color.new(bgCol, 0), style=line.style_dashed, width=1)
+                lowLine  := line.new(bar_index, sessLow, bar_index, sessLow, color=color.new(bgCol, 0), style=line.style_dashed, width=1)
+        else if inSession
+            sessHigh := na(sessHigh) ? high : math.max(sessHigh, high)
+            sessLow  := na(sessLow) ? low : math.min(sessLow, low)
+
+            if not na(sessBox)
+                box.set_top(sessBox, sessHigh)
+                box.set_bottom(sessBox, sessLow)
+                box.set_right(sessBox, bar_index)
+
+            if extendHL
+                if not na(highLine)
+                    line.set_y1(highLine, sessHigh)
+                    line.set_y2(highLine, sessHigh)
+                    line.set_x2(highLine, bar_index)
+                if not na(lowLine)
+                    line.set_y1(lowLine, sessLow)
+                    line.set_y2(lowLine, sessLow)
+                    line.set_x2(lowLine, bar_index)
+        else if extendHL and not na(startBar) and bar_index - startBar < 150
+            if not na(highLine)
+                line.set_x2(highLine, bar_index)
+            if not na(lowLine)
+                line.set_x2(lowLine, bar_index)
+
+// --- Execute ---
+drawSession(showAsia, asiaTime, asiaColor, "Asia")
+drawSession(showLondon, lonTime, lonColor, "London")
+drawSession(showNY, nyTime, nyColor, "New York")
