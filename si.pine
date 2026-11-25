@@ -1,81 +1,476 @@
 //@version=5
-indicator("Forex Session Liquidity Ranges", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+indicator("Session Liquidity Map v2", shorttitle="SLM2", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
-// --- Session Time Inputs ---
-tz         = input.string("America/New_York", "Timezone", options=["America/New_York", "UTC", "Europe/London", "Asia/Dhaka"])
-extendHL   = input.bool(true, "Extend High/Low Liquidity Lines")
+// =============================================================================
+// DESIGN NOTE
+// Every market window is anchored to the New York clock (America/New_York).
+// TradingView's timezone database handles US daylight saving, so the windows
+// shift in Dhaka time on their own twice a year. Labels convert to your local
+// clock with str.format_time, so nothing is ever hand-adjusted.
+// Personal rules (the bedtime cutoff) are anchored to the LOCAL clock instead,
+// because Bangladesh has no DST and your bedtime should not move.
+// =============================================================================
 
-showAsia   = input.bool(true, "Show Asia Session", inline="asia")
-asiaTime   = input.session("2000-0000", "", inline="asia")
-asiaColor  = input.color(color.new(#2962FF, 85), "", inline="asia")
+// =============================================================================
+// Inputs
+// =============================================================================
+G_GEN = "General"
+tz          = input.string("America/New_York", "Market clock (anchor)", options=["America/New_York", "UTC", "Europe/London"], group=G_GEN)
+localTz     = input.string("Asia/Dhaka", "Your local clock", options=["Asia/Dhaka", "Asia/Kolkata", "UTC", "Europe/London", "America/New_York"], group=G_GEN)
+extendHL    = input.bool(true, "Extend highs/lows until swept", group=G_GEN)
+maxBars     = input.int(500, "Max extension (bars)", minval=10, group=G_GEN)
+sweptCol    = input.color(color.new(color.gray, 60), "Swept line color", group=G_GEN)
+showMid     = input.bool(true, "Show midpoints (50% equilibrium)", group=G_GEN)
+pipOverride = input.float(0.0, "Pip size override (0 = auto)", minval=0.0, step=0.0001, group=G_GEN)
 
-showLondon = input.bool(true, "Show London Session", inline="lon")
-lonTime    = input.session("0200-0500", "", inline="lon")
-lonColor   = input.color(color.new(#00897B, 85), "", inline="lon")
+G_SES = "Killzones (market clock)"
+showAsia    = input.bool(true,  "Asia",             inline="asia", group=G_SES)
+asiaTime    = input.session("2000-0000", "",        inline="asia", group=G_SES)
+asiaColor   = input.color(color.new(#2962FF, 85), "", inline="asia", group=G_SES)
 
-showNY     = input.bool(true, "Show New York Session", inline="ny")
-nyTime     = input.session("0700-1000", "", inline="ny")
-nyColor    = input.color(color.new(#8E24AA, 85), "", inline="ny")
+showLondon  = input.bool(true,  "London",           inline="lon", group=G_SES)
+lonTime     = input.session("0200-0500", "",        inline="lon", group=G_SES)
+lonColor    = input.color(color.new(#00897B, 85), "", inline="lon", group=G_SES)
 
-// --- Function to Draw Session Boxes & Liquidity Lines ---
-drawSession(bool active, string sessTime, color bgCol, string labelTxt) =>
-    inSession  = not na(time(timeframe.period, sessTime, tz))
-    newSession = inSession and not inSession[1]
+showNYPre   = input.bool(true,  "NY pre-market / news", inline="pre", group=G_SES)
+nyPreTime   = input.session("0800-0930", "",        inline="pre", group=G_SES)
+nyPreColor  = input.color(color.new(#FFB300, 85), "", inline="pre", group=G_SES)
 
-    var box   sessBox  = na
-    var line  highLine = na
-    var line  lowLine  = na
-    var float sessHigh = na
-    var float sessLow  = na
-    var int   startBar = na
+showNYOpen  = input.bool(true,  "NY open",          inline="open", group=G_SES)
+nyOpenTime  = input.session("0930-1200", "",        inline="open", group=G_SES)
+nyOpenColor = input.color(color.new(#8E24AA, 85), "", inline="open", group=G_SES)
+
+showNYPM    = input.bool(true,  "NY PM",            inline="pm", group=G_SES)
+nyPMTime    = input.session("1330-1600", "",        inline="pm", group=G_SES)
+nyPMColor   = input.color(color.new(#D81B60, 85), "", inline="pm", group=G_SES)
+
+showCash    = input.bool(true,  "NY cash session (lines only)", inline="cash", group=G_SES)
+nyCashTime  = input.session("0930-1600", "",        inline="cash", group=G_SES)
+cashColor   = input.color(color.new(#FF6D00, 0), "", inline="cash", group=G_SES)
+
+G_ORB = "Opening range (ORB)"
+showORB  = input.bool(true, "Show opening range", group=G_ORB)
+orbH     = input.int(9,  "Start hour (market clock)", minval=0, maxval=23, group=G_ORB)
+orbM     = input.int(30, "Start minute", minval=0, maxval=59, group=G_ORB)
+orbLen   = input.int(15, "Length (minutes)", options=[15, 30, 60], group=G_ORB, tooltip="The chart timeframe must not be larger than this. 60 minutes doubles as the Initial Balance.")
+orbColor = input.color(color.new(#00BCD4, 80), "Color", group=G_ORB)
+
+G_MRK = "Markers"
+showLdnClose = input.bool(true, "London close marker", inline="ldn", group=G_MRK)
+ldnCloseTime = input.session("1100-1101", "", inline="ldn", group=G_MRK)
+showCutoff   = input.bool(true, "Walk-away cutoff (LOCAL clock)", group=G_MRK)
+cutH         = input.int(23, "Cutoff hour", minval=0, maxval=23, group=G_MRK)
+cutM         = input.int(30, "Cutoff minute", minval=0, maxval=59, group=G_MRK)
+
+G_LVL = "Previous day / week"
+showPD  = input.bool(true, "Previous day high/low", inline="pd", group=G_LVL)
+pdCol   = input.color(color.yellow, "", inline="pd", group=G_LVL)
+showPW  = input.bool(true, "Previous week high/low", inline="pw", group=G_LVL)
+pwCol   = input.color(color.orange, "", inline="pw", group=G_LVL)
+
+G_POC = "NY session POC (approximate)"
+showPOC   = input.bool(true, "Show NY cash session POC", group=G_POC)
+pocStepIn = input.float(0.0, "Bucket size in pips (0 = auto from ATR)", minval=0.0, group=G_POC)
+pocCol    = input.color(color.fuchsia, "Color", group=G_POC)
+
+G_PNL = "Panel and alerts"
+showPanel  = input.bool(true, "Show panel", group=G_PNL)
+panelPos   = input.string("Top right", "Position", options=["Top right", "Bottom right", "Top left", "Bottom left"], group=G_PNL)
+adrLen     = input.int(14, "ADR length (days)", minval=1, group=G_PNL)
+exhaustPct = input.float(95.0, "Range exhaustion threshold (%)", minval=10.0, group=G_PNL)
+volLen     = input.int(20, "Volume average length", minval=2, group=G_PNL)
+volMult    = input.float(2.0, "Volume spike multiple", minval=1.0, step=0.1, group=G_PNL)
+
+// =============================================================================
+// Derived values
+// =============================================================================
+// One forex pip is 10 ticks on 5/3-decimal quotes. Use the override for 4-digit brokers.
+pipSz = pipOverride > 0 ? pipOverride : (syminfo.type == "forex" ? syminfo.mintick * 10 : syminfo.mintick)
+
+tfOk  = timeframe.isintraday and timeframe.in_seconds() <= 3600
+orbOk = timeframe.isintraday and timeframe.in_seconds() <= orbLen * 60
+
+// Build the ORB window string (e.g. "0930-0945") from its start and length.
+orbEndMin = orbH * 60 + orbM + orbLen
+orbWin    = str.tostring(orbH, "00") + str.tostring(orbM, "00") + "-" + str.tostring(math.floor(orbEndMin / 60) % 24, "00") + str.tostring(orbEndMin % 60, "00")
+
+// ADR in pips from completed days. Reading one bar back with lookahead on is the
+// standard non-repainting way to take a prior higher-timeframe value.
+adrPips = request.security(syminfo.tickerid, "D", ta.sma(high - low, adrLen)[1], lookahead=barmerge.lookahead_on) / pipSz
+
+// =============================================================================
+// Session state and engine
+// =============================================================================
+type Session
+    string      name
+    color       col
+    bool        drawBox = true
+    box         rng
+    line        hiLine
+    line        loLine
+    line        midLine
+    float       hi
+    float       lo
+    float       doneHi
+    float       doneLo
+    string      startTxt = ""
+    array<line> openHi
+    array<line> openLo
+    bool        sweptHi = false
+    bool        sweptLo = false
+    bool        brokeUp = false
+    bool        brokeDn = false
+
+// Phases per bar:
+//   1) build the live range while the window is open
+//   2) when it closes, move its lines into the pool of open liquidity levels
+//   3) scan the pool and retire levels that price has traded through
+// Each session has its own call site, so the history references below are safe.
+method update(Session s, bool active, string sess, float pz, float adr) =>
+    s.sweptHi := false
+    s.sweptLo := false
+    s.brokeUp := false
+    s.brokeDn := false
+
+    inSess = not na(time(timeframe.period, sess, tz))
+    began  = inSess and not inSess[1]
+    ended  = not inSess and inSess[1]
 
     if active
-        if newSession
-            sessHigh := high
-            sessLow  := low
-            startBar := bar_index
-
-            sessBox := box.new(
-              left=bar_index,
-              top=sessHigh,
-              right=bar_index,
-              bottom=sessLow,
-              bgcolor=bgCol,
-              border_color=color.new(bgCol, 20),
-              border_width=1,
-              text=labelTxt,
-              text_color=color.new(bgCol, 0),
-              text_size=size.small,
-              text_halign=text.align_left)
-
+        // ---- 1) live range ----
+        if began
+            s.hi       := high
+            s.lo       := low
+            s.doneHi   := na
+            s.doneLo   := na
+            s.startTxt := str.format_time(time, "HH:mm", localTz)
+            if s.drawBox
+                s.rng := box.new(bar_index, high, bar_index, low,
+                     bgcolor=s.col, border_color=color.new(s.col, 20),
+                     text=s.name, text_color=color.new(s.col, 0),
+                     text_size=size.small, text_halign=text.align_left)
             if extendHL
-                highLine := line.new(bar_index, sessHigh, bar_index, sessHigh, color=color.new(bgCol, 0), style=line.style_dashed, width=1)
-                lowLine  := line.new(bar_index, sessLow, bar_index, sessLow, color=color.new(bgCol, 0), style=line.style_dashed, width=1)
-        else if inSession
-            sessHigh := na(sessHigh) ? high : math.max(sessHigh, high)
-            sessLow  := na(sessLow) ? low : math.min(sessLow, low)
+                s.hiLine := line.new(bar_index, high, bar_index, high, color=color.new(s.col, 0), style=line.style_dashed)
+                s.loLine := line.new(bar_index, low,  bar_index, low,  color=color.new(s.col, 0), style=line.style_dashed)
+            if showMid
+                s.midLine := line.new(bar_index, hl2, bar_index, hl2, color=color.new(s.col, 30), style=line.style_dotted)
+        else if inSess and not na(s.hi)
+            s.hi := math.max(s.hi, high)
+            s.lo := math.min(s.lo, low)
 
-            if not na(sessBox)
-                box.set_top(sessBox, sessHigh)
-                box.set_bottom(sessBox, sessLow)
-                box.set_right(sessBox, bar_index)
+        if inSess and not na(s.hi)
+            rngPips = (s.hi - s.lo) / pz
+            pctAdr  = adr > 0 ? rngPips / adr * 100 : na
+            if not na(s.rng)
+                s.rng.set_top(s.hi)
+                s.rng.set_bottom(s.lo)
+                s.rng.set_right(bar_index)
+                s.rng.set_text(s.name + "  " + s.startTxt + "-" + str.format_time(time_close, "HH:mm", localTz) + "  " + str.tostring(rngPips, "#.#") + "p" + (na(pctAdr) ? "" : "  |  " + str.tostring(pctAdr, "#") + "% ADR"))
+            if extendHL and not na(s.hiLine)
+                s.hiLine.set_y1(s.hi)
+                s.hiLine.set_y2(s.hi)
+                s.hiLine.set_x2(bar_index)
+                s.loLine.set_y1(s.lo)
+                s.loLine.set_y2(s.lo)
+                s.loLine.set_x2(bar_index)
+            if showMid and not na(s.midLine)
+                mid = (s.hi + s.lo) / 2
+                s.midLine.set_y1(mid)
+                s.midLine.set_y2(mid)
+                s.midLine.set_x2(bar_index)
 
-            if extendHL
-                if not na(highLine)
-                    line.set_y1(highLine, sessHigh)
-                    line.set_y2(highLine, sessHigh)
-                    line.set_x2(highLine, bar_index)
-                if not na(lowLine)
-                    line.set_y1(lowLine, sessLow)
-                    line.set_y2(lowLine, sessLow)
-                    line.set_x2(lowLine, bar_index)
-        else if extendHL and not na(startBar) and bar_index - startBar < 150
-            if not na(highLine)
-                line.set_x2(highLine, bar_index)
-            if not na(lowLine)
-                line.set_x2(lowLine, bar_index)
+        // ---- 2) hand-off ----
+        if ended
+            s.doneHi := s.hi
+            s.doneLo := s.lo
+            if extendHL and not na(s.hiLine)
+                s.openHi.push(s.hiLine)
+                s.openLo.push(s.loLine)
+                // Pine silently drops the oldest drawings past the cap, so keep the pool short.
+                if s.openHi.size() > 40
+                    s.openHi.shift()
+                    s.openLo.shift()
 
-// --- Execute ---
-drawSession(showAsia, asiaTime, asiaColor, "Asia")
-drawSession(showLondon, lonTime, lonColor, "London")
-drawSession(showNY, nyTime, nyColor, "New York")
+        // ---- first close beyond the last completed range ----
+        if not na(s.doneHi)
+            s.brokeUp := close > s.doneHi and close[1] <= s.doneHi
+            s.brokeDn := close < s.doneLo and close[1] >= s.doneLo
+
+        // ---- 3) sweep scan ----
+        // The size guard matters: "for i = -1 to 0" would still iterate on an empty array.
+        if extendHL
+            if s.openHi.size() > 0
+                for i = s.openHi.size() - 1 to 0
+                    ln = s.openHi.get(i)
+                    if high > ln.get_y1()
+                        ln.set_x2(bar_index)
+                        ln.set_color(sweptCol)
+                        ln.set_style(line.style_dotted)
+                        s.openHi.remove(i)
+                        s.sweptHi := true
+                    else if bar_index - ln.get_x1() > maxBars
+                        s.openHi.remove(i)
+                    else
+                        ln.set_x2(bar_index)
+            if s.openLo.size() > 0
+                for i = s.openLo.size() - 1 to 0
+                    ln = s.openLo.get(i)
+                    if low < ln.get_y1()
+                        ln.set_x2(bar_index)
+                        ln.set_color(sweptCol)
+                        ln.set_style(line.style_dotted)
+                        s.openLo.remove(i)
+                        s.sweptLo := true
+                    else if bar_index - ln.get_x1() > maxBars
+                        s.openLo.remove(i)
+                    else
+                        ln.set_x2(bar_index)
+
+// =============================================================================
+// Run the windows
+// =============================================================================
+var Session asia   = Session.new(name="Asia",       col=asiaColor,   openHi=array.new<line>(), openLo=array.new<line>())
+var Session london = Session.new(name="London",     col=lonColor,    openHi=array.new<line>(), openLo=array.new<line>())
+var Session nyPre  = Session.new(name="NY Pre",     col=nyPreColor,  openHi=array.new<line>(), openLo=array.new<line>())
+var Session nyOpen = Session.new(name="NY Open",    col=nyOpenColor, openHi=array.new<line>(), openLo=array.new<line>())
+var Session nyPM   = Session.new(name="NY PM",      col=nyPMColor,   openHi=array.new<line>(), openLo=array.new<line>())
+var Session nyCash = Session.new(name="NY Cash",    col=cashColor,   drawBox=false, openHi=array.new<line>(), openLo=array.new<line>())
+var Session orb    = Session.new(name="ORB " + str.tostring(orbLen) + "m", col=orbColor, openHi=array.new<line>(), openLo=array.new<line>())
+
+asia.update(showAsia and tfOk,      asiaTime,   pipSz, adrPips)
+london.update(showLondon and tfOk,  lonTime,    pipSz, adrPips)
+nyPre.update(showNYPre and tfOk,    nyPreTime,  pipSz, adrPips)
+nyOpen.update(showNYOpen and tfOk,  nyOpenTime, pipSz, adrPips)
+nyPM.update(showNYPM and tfOk,      nyPMTime,   pipSz, adrPips)
+nyCash.update(showCash and tfOk,    nyCashTime, pipSz, adrPips)
+orb.update(showORB and orbOk,       orbWin,     pipSz, adrPips)
+
+plotshape(orb.brokeUp, "ORB break up",   shape.triangleup,   location.belowbar, color.lime, size=size.tiny)
+plotshape(orb.brokeDn, "ORB break down", shape.triangledown, location.abovebar, color.red,  size=size.tiny)
+
+// =============================================================================
+// Daily range tracking, exhaustion, volume
+// =============================================================================
+var float dayHi = na
+var float dayLo = na
+if timeframe.change("D")
+    dayHi := high
+    dayLo := low
+else
+    dayHi := na(dayHi) ? high : math.max(dayHi, high)
+    dayLo := na(dayLo) ? low  : math.min(dayLo, low)
+
+todayPips = (dayHi - dayLo) / pipSz
+usedPct   = adrPips > 0 ? todayPips / adrPips * 100 : na
+
+// Share of the average daily range already spent when the NY open window begins
+nyOpenNow = not na(time(timeframe.period, nyOpenTime, tz))
+openBar   = nyOpenNow and not nyOpenNow[1]
+var float usedAtOpen = na
+if openBar
+    usedAtOpen := usedPct
+
+volAvg   = ta.sma(volume, volLen)
+volRatio = volAvg > 0 ? volume / volAvg : na
+volSpike = not na(volRatio) and volRatio >= volMult and nyOpenNow
+plotchar(volSpike, "NY open volume spike", "▲", location.belowbar, color.new(color.yellow, 0), size=size.tiny)
+
+// =============================================================================
+// Previous day / week levels
+// =============================================================================
+pdH = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdL = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+pwH = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_on)
+pwL = request.security(syminfo.tickerid, "W", low[1],  lookahead=barmerge.lookahead_on)
+
+var line pdHiLn = na
+var line pdLoLn = na
+var line pwHiLn = na
+var line pwLoLn = na
+
+if timeframe.isintraday
+    if showPD
+        if timeframe.change("D")
+            pdHiLn := line.new(bar_index, pdH, bar_index, pdH, color=pdCol, style=line.style_dashed)
+            pdLoLn := line.new(bar_index, pdL, bar_index, pdL, color=pdCol, style=line.style_dashed)
+        else if not na(pdHiLn)
+            pdHiLn.set_x2(bar_index)
+            pdLoLn.set_x2(bar_index)
+    if showPW
+        if timeframe.change("W")
+            pwHiLn := line.new(bar_index, pwH, bar_index, pwH, color=pwCol, style=line.style_dashed)
+            pwLoLn := line.new(bar_index, pwL, bar_index, pwL, color=pwCol, style=line.style_dashed)
+        else if not na(pwHiLn)
+            pwHiLn.set_x2(bar_index)
+            pwLoLn.set_x2(bar_index)
+
+// =============================================================================
+// NY cash session POC (approximate, built from chart-bar volume)
+// Each bar's volume is spread evenly over the price buckets its range touches.
+// =============================================================================
+inCash     = not na(time(timeframe.period, nyCashTime, tz))
+cashBegan  = inCash and not inCash[1]
+atrVal     = ta.atr(100)
+
+var array<int>   pocKeys  = array.new<int>()
+var array<float> pocVols  = array.new<float>()
+var float        pocStep  = na
+var float        pocPrice = na
+var line         pocLine  = na
+
+if showPOC and timeframe.isintraday and inCash and volume > 0
+    if cashBegan or na(pocStep)
+        pocKeys.clear()
+        pocVols.clear()
+        pocStep := pocStepIn > 0 ? pocStepIn * pipSz : math.max(syminfo.mintick, atrVal / 6)
+    if not na(pocStep)
+        kLo = int(math.floor(low / pocStep))
+        kHi = int(math.floor(high / pocStep))
+        if kHi - kLo > 80
+            kLo := int(math.floor(hlc3 / pocStep))
+            kHi := kLo
+        share = volume / (kHi - kLo + 1)
+        for k = kLo to kHi
+            idx = pocKeys.indexof(k)
+            if idx >= 0
+                pocVols.set(idx, pocVols.get(idx) + share)
+            else
+                pocKeys.push(k)
+                pocVols.push(share)
+        mi = pocVols.indexof(pocVols.max())
+        pocPrice := pocKeys.get(mi) * pocStep + pocStep / 2
+        if cashBegan or na(pocLine)
+            pocLine := line.new(bar_index, pocPrice, bar_index, pocPrice, color=pocCol, width=2)
+        else
+            pocLine.set_y1(pocPrice)
+            pocLine.set_y2(pocPrice)
+            pocLine.set_x2(bar_index)
+
+// =============================================================================
+// Markers: London close (shows the live local time, so DST drift is visible)
+// and the walk-away line (local clock, so it never moves)
+// =============================================================================
+ldnNow = not na(time(timeframe.period, ldnCloseTime, tz))
+if showLdnClose and timeframe.isintraday and ldnNow and not ldnNow[1]
+    line.new(bar_index, low, bar_index, high + syminfo.mintick, extend=extend.both, color=color.new(color.gray, 40), style=line.style_dotted)
+    label.new(bar_index, high, "LDN close " + str.format_time(time, "HH:mm", localTz), style=label.style_label_down, color=color.new(color.gray, 30), textcolor=color.white, size=size.tiny)
+
+tfMin    = timeframe.in_seconds() / 60
+nowLocal = hour(time, localTz) * 60 + minute(time, localTz)
+cutMin   = cutH * 60 + cutM
+// True for exactly one bar per day: the bar whose span contains the cutoff minute (works across midnight)
+crossesCut = (cutMin - nowLocal + 1440) % 1440 < tfMin
+if showCutoff and timeframe.isintraday and crossesCut
+    line.new(bar_index, low, bar_index, high + syminfo.mintick, extend=extend.both, color=color.red, style=line.style_dashed, width=2)
+    label.new(bar_index, high, "Stop trading / close desk", style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+
+// =============================================================================
+// Right-edge tags, countdown and panel (last bar only)
+// =============================================================================
+tag(label old, float y, string txt, color c) =>
+    label.delete(old)
+    label.new(bar_index + 2, y, txt, style=label.style_none, textcolor=c, size=size.small)
+
+winStart(string w) => int(str.tonumber(str.substring(w, 0, 2))) * 60 + int(str.tonumber(str.substring(w, 2, 4)))
+winEnd(string w)   => int(str.tonumber(str.substring(w, 5, 7))) * 60 + int(str.tonumber(str.substring(w, 7, 9)))
+fmtMins(int m)     => m >= 60 ? str.tostring(math.floor(m / 60)) + "h " + str.tostring(m % 60, "00") + "m" : str.tostring(m) + "m"
+
+var label tPdh = na
+var label tPdl = na
+var label tPwh = na
+var label tPwl = na
+var label tPoc = na
+
+tblPos = switch panelPos
+    "Top right"    => position.top_right
+    "Bottom right" => position.bottom_right
+    "Top left"     => position.top_left
+    => position.bottom_left
+
+var table panel = table.new(tblPos, 2, 8, bgcolor=color.new(color.black, 70), frame_color=color.new(color.gray, 60), frame_width=1)
+
+if barstate.islast
+    if timeframe.isintraday
+        if showPD
+            tPdh := tag(tPdh, pdH, "PDH", pdCol)
+            tPdl := tag(tPdl, pdL, "PDL", pdCol)
+        if showPW
+            tPwh := tag(tPwh, pwH, "PWH", pwCol)
+            tPwl := tag(tPwl, pwL, "PWL", pwCol)
+        if showPOC and not na(pocPrice)
+            tPoc := tag(tPoc, pocPrice, "NY POC", pocCol)
+
+    // ---- countdown ----
+    nowMin = hour(timenow, tz) * 60 + minute(timenow, tz)
+    names  = array.from("Asia", "London", "NY Pre", "NY Open", "NY PM")
+    ons    = array.from(showAsia, showLondon, showNYPre, showNYOpen, showNYPM)
+    wins   = array.from(asiaTime, lonTime, nyPreTime, nyOpenTime, nyPMTime)
+
+    inName  = ""
+    inLeft  = 0
+    nxtName = ""
+    nxtIn   = 100000
+    for i = 0 to names.size() - 1
+        if ons.get(i)
+            w   = wins.get(i)
+            s0  = winStart(w)
+            e0  = winEnd(w)
+            len = (e0 - s0 + 1440) % 1440
+            off = (nowMin - s0 + 1440) % 1440
+            if off < len
+                inName := names.get(i)
+                inLeft := len - off
+            else
+                untilStart = (s0 - nowMin + 1440) % 1440
+                if untilStart < nxtIn
+                    nxtIn   := untilStart
+                    nxtName := names.get(i)
+
+    // Spot forex is closed from Friday 17:00 to Sunday 17:00 New York time
+    dow    = dayofweek(timenow, tz)
+    closed = syminfo.type == "forex" and (dow == dayofweek.saturday or (dow == dayofweek.friday and nowMin >= 1020) or (dow == dayofweek.sunday and nowMin < 1020))
+    cdText = closed ? "Market closed" : inName != "" ? inName + " ends in " + fmtMins(inLeft) : nxtName != "" ? nxtName + " in " + fmtMins(nxtIn) : "-"
+
+    diffMin = ((hour(timenow, localTz) * 60 + minute(timenow, localTz)) - nowMin + 1440) % 1440
+
+    usedCol = na(usedPct) ? color.gray : usedPct >= exhaustPct ? color.red : usedPct >= 70 ? color.orange : color.lime
+    usedTxt = na(usedPct) ? "-" : str.tostring(usedPct, "#") + "%" + (usedPct >= exhaustPct ? "  EXHAUSTED" : "")
+    openTxt = na(usedAtOpen) ? "-" : str.tostring(usedAtOpen, "#") + "%"
+    openCol = na(usedAtOpen) ? color.gray : usedAtOpen >= exhaustPct ? color.red : usedAtOpen >= 70 ? color.orange : color.lime
+    volTxt  = na(volRatio) ? "-" : str.tostring(volRatio, "#.0") + "x"
+
+    if showPanel
+        lbl = color.gray
+        table.cell(panel, 0, 0, "ADR (" + str.tostring(adrLen) + "d)", text_color=lbl, text_halign=text.align_left, text_size=size.small)
+        table.cell(panel, 1, 0, str.tostring(adrPips, "#.#") + "p", text_color=color.white, text_halign=text.align_right, text_size=size.small)
+        table.cell(panel, 0, 1, "Today", text_color=lbl, text_halign=text.align_left, text_size=size.small)
+        table.cell(panel, 1, 1, str.tostring(todayPips, "#.#") + "p", text_color=color.white, text_halign=text.align_right, text_size=size.small)
+        table.cell(panel, 0, 2, "ADR used", text_color=lbl, text_halign=text.align_left, text_size=size.small)
+        table.cell(panel, 1, 2, usedTxt, text_color=usedCol, text_halign=text.align_right, text_size=size.small)
+        table.cell(panel, 0, 3, "Used at NY open", text_color=lbl, text_halign=text.align_left, text_size=size.small)
+        table.cell(panel, 1, 3, openTxt, text_color=openCol, text_halign=text.align_right, text_size=size.small)
+        table.cell(panel, 0, 4, "Volume vs avg", text_color=lbl, text_halign=text.align_left, text_size=size.small)
+        table.cell(panel, 1, 4, volTxt, text_color=color.white, text_halign=text.align_right, text_size=size.small)
+        table.cell(panel, 0, 5, "Clock (market | local)", text_color=lbl, text_halign=text.align_left, text_size=size.small)
+        table.cell(panel, 1, 5, str.format_time(timenow, "HH:mm", tz) + " | " + str.format_time(timenow, "HH:mm", localTz), text_color=color.white, text_halign=text.align_right, text_size=size.small)
+        table.cell(panel, 0, 6, "Local ahead of market", text_color=lbl, text_halign=text.align_left, text_size=size.small)
+        table.cell(panel, 1, 6, "+" + str.tostring(diffMin / 60, "#.#") + "h", text_color=color.white, text_halign=text.align_right, text_size=size.small)
+        table.cell(panel, 0, 7, "Next", text_color=lbl, text_halign=text.align_left, text_size=size.small)
+        table.cell(panel, 1, 7, cdText, text_color=color.aqua, text_halign=text.align_right, text_size=size.small)
+
+// =============================================================================
+// Alerts (alertcondition must sit at global scope, so flags come from the objects)
+// =============================================================================
+anySweepHi = asia.sweptHi or london.sweptHi or nyPre.sweptHi or nyOpen.sweptHi or nyPM.sweptHi or nyCash.sweptHi
+anySweepLo = asia.sweptLo or london.sweptLo or nyPre.sweptLo or nyOpen.sweptLo or nyPM.sweptLo or nyCash.sweptLo
+anyBrokeUp = asia.brokeUp or london.brokeUp or nyPre.brokeUp or nyOpen.brokeUp or nyPM.brokeUp
+anyBrokeDn = asia.brokeDn or london.brokeDn or nyPre.brokeDn or nyOpen.brokeDn or nyPM.brokeDn
+
+alertcondition(anySweepHi, "Session high swept", "Prior session high swept on {{ticker}}")
+alertcondition(anySweepLo, "Session low swept",  "Prior session low swept on {{ticker}}")
+alertcondition(anyBrokeUp, "Close above last session high", "Close above last session high on {{ticker}}")
+alertcondition(anyBrokeDn, "Close below last session low",  "Close below last session low on {{ticker}}")
+alertcondition(orb.brokeUp, "ORB break up",   "Opening range broken to the upside on {{ticker}}")
+alertcondition(orb.brokeDn, "ORB break down", "Opening range broken to the downside on {{ticker}}")
+alertcondition(ta.crossover(usedPct, exhaustPct), "Daily range exhausted", "Daily range is spent on {{ticker}}")
+alertcondition(volSpike, "NY open volume spike", "Volume spike inside the NY open window on {{ticker}}")
