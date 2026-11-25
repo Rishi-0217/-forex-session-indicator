@@ -1,16 +1,5 @@
 //@version=5
 indicator("Session Liquidity Map v2", shorttitle="SLM2", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
-
-// =============================================================================
-// DESIGN NOTE
-// Every market window is anchored to the New York clock (America/New_York).
-// TradingView's timezone database handles US daylight saving, so the windows
-// shift in Dhaka time on their own twice a year. Labels convert to your local
-// clock with str.format_time, so nothing is ever hand-adjusted.
-// Personal rules (the bedtime cutoff) are anchored to the LOCAL clock instead,
-// because Bangladesh has no DST and your bedtime should not move.
-// =============================================================================
-
 // =============================================================================
 // Inputs
 // =============================================================================
